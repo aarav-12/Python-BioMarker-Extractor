@@ -682,11 +682,11 @@ def _parse_line(line: str) -> dict | None:
                     name = re.sub(r'\s+', ' ', name).strip()
                     return {"name": name, "value": value, "unit": unit}
 
-    # ── Fallback: no unit in line — require strong whitespace separation ─────
-    # Pattern: NAME  <2+ spaces>  NUMBER  (e.g. "HbA1c   5.6")
-    # Only trigger when name is substantial and number is clearly separated
+    # ── Fallback: no unit in line ────────────────────────────────────────────
+    # Fix 3: relaxed to single space — PDFs often collapse spacing.
+    # Pattern: NAME <1+ spaces> NUMBER  (e.g. "HbA1c 5.9" or "HbA1c   5.6")
     no_unit_m = re.match(
-        r"^([A-Za-z][A-Za-z0-9\s\-\(\)/,\.]{3,50}?)\s{2,}(\d+\.?\d*(?:[eE][+\-]?\d+)?)\s*$",
+        r"^([A-Za-z][A-Za-z0-9\s\-\(\)/,\.]{2,50})\s+(\d+\.?\d*(?:[eE][+\-]?\d+)?)\s*$",
         line,
     )
     if no_unit_m:
@@ -866,14 +866,31 @@ def extract_biomarkers(chunks: list[str], pdf_path: str | None = None) -> list[d
     if pdf_path:
         table_res = _parse_tables(pdf_path)
         text_res  = _parse_text(pdf_path)
-        merged    = _merge(table_res, text_res)
-        logger.info(
-            "Extraction: table=%d  text=%d  merged=%d",
-            len(table_res), len(text_res), len(merged)
-        )
-        if len(merged) >= 3:
-            return _drop_invalid(_drop_junk(merged))
 
-    # Fallback for scanned PDFs, split rows, inline text, OCR-degraded files
-    logger.info("Deterministic parsers yielded < 3 results — falling back to LLM")
+        # Fix 2: always log counts so you can see exactly what each parser found
+        logger.info("TABLE COUNT: %d", len(table_res))
+        logger.info("TEXT COUNT:  %d", len(text_res))
+
+        # Fix 1: never early-return — always merge both parsers first.
+        # If total is still low (< 10), layer in LLM results on top.
+        final = _merge(table_res, text_res)
+
+        if len(final) < 10:
+            logger.info(
+                "Low extraction (%d results) — running LLM fallback to fill gaps",
+                len(final),
+            )
+            llm_res = _llm_extract(chunks)
+            logger.info("LLM added %d candidates", len(llm_res))
+            final = _merge(final, llm_res)  # deterministic results take priority
+
+        # Fix 4: log every final result for easy visual debugging
+        for r in final:
+            logger.debug("FINAL: %s = %s %s", r["name"], r["value"], r["unit"])
+
+        logger.info("FINAL COUNT: %d", len(final))
+        return _drop_invalid(_drop_junk(final))
+
+    # No pdf_path supplied — LLM only (e.g. called from test with raw chunks)
+    logger.info("No pdf_path — LLM-only extraction")
     return _drop_invalid(_drop_junk(_llm_extract(chunks)))
