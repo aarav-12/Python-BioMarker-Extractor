@@ -536,56 +536,56 @@ def _parse_numeric(s: str) -> float | None:
 
 # ── TABLE PARSER ──────────────────────────────────────────────────────────────
 
-def _detect_layout(table: list[list]) -> str:
+def _is_ref_range(cell: str) -> bool:
+    """True if cell looks like a reference range, not a result value."""
+    c = (cell or "").strip()
+    if re.match(r"^[<>≤≥]", c):
+        return True
+    if re.match(r"^\d+\.?\d*\s*[-–]\s*\d+\.?\d*$", c):
+        return True
+    return False
+
+
+def _detect_value_index(cells: list) -> int | None:
     """
-    Detect table column layout by scanning data rows.
-
-    Layout A — standard lab format (3 cols):
-        [Name,  Value,  Unit/Ref]
-        e.g. ['SERUM CREATININE', '1.00', 'mg/dL', '0.7-1.2']
-
-    Layout B — category-based format (4 cols):
-        [Category,  Biomarker,  Ideal/Ref,  Actual Value]
-        e.g. ['Metabolic', 'HbA1c', '<5.4', '5.9']
-
-    Heuristic: if col[2] of most data rows starts with < > ≤ ≥
-    and col[3] contains a bare number → Layout B.
+    Find the column index that contains the patient result value.
+    Skips reference-range cells. Prefers pure-number cells over mixed cells.
+    Handles 3-col, 4-col, and any weird hospital format automatically.
     """
-    b_votes = 0
-    a_votes = 0
-    for row in table[:8]:   # sample first 8 rows
-        if not row or len(row) < 4:
+    best_idx   = None
+    best_score = -1
+
+    for i, cell in enumerate(cells):
+        if not cell or _is_ref_range(cell):
             continue
-        cells = [(c or "").strip() for c in row]
-        col2  = cells[2] if len(cells) > 2 else ""
-        col3  = cells[3] if len(cells) > 3 else ""
-        # col2 looks like a reference range AND col3 looks like a number
-        if re.match(r"^\s*[<>≤≥]", col2) and _NUM_SEARCH_RE.search(col3):
-            b_votes += 1
-        elif _NUM_SEARCH_RE.search(cells[1] if len(cells) > 1 else ""):
-            a_votes += 1
-    return "B" if b_votes > a_votes else "A"
+        if not re.search(r"\d", cell):
+            continue
+        stripped = _UNIT_RE.sub("", cell).strip()
+        stripped = re.sub(r"\([\d\.\-\–]+\)", "", stripped).strip()
+        if _NUM_STRICT_RE.match(stripped):
+            score = 2
+        elif _NUM_SEARCH_RE.search(stripped):
+            score = 1
+        else:
+            continue
+        if score > best_score:
+            best_score = score
+            best_idx   = i
+
+    return best_idx
 
 
-def _extract_value_and_unit(value_cell: str, unit_cell: str = "") -> tuple[float | None, str]:
+def _extract_value_and_unit(value_cell: str, unit_cell: str = "") -> tuple:
     """
     Robustly extract (value, unit) from one or two cells.
     Handles: "5.9", "5.9%", "120 mg/dL", "1.2E3", "5.9 (3.5-5.0)"
-    Returns (None, "") if no numeric value found.
     """
-    # Skip reference-range-only cells
-    if re.match(r"^\s*[<>≤≥]\s*\d", value_cell) and not _NUM_SEARCH_RE.search(
-        re.sub(r"^[<>≤≥]\s*[\d\.]+", "", value_cell)
-    ):
+    if not value_cell or _is_ref_range(value_cell):
         return None, ""
 
-    # Pull unit from value cell or dedicated unit cell
-    unit = _extract_unit(unit_cell) or _extract_unit(value_cell)
-
-    # Strip unit from value cell before numeric parse
+    unit  = _extract_unit(unit_cell) or _extract_unit(value_cell)
     clean = _UNIT_RE.sub("", value_cell).strip()
-    # Strip parenthetical reference ranges like "(3.5-5.0)"
-    clean = re.sub(r"\([\d\.\-–]+\)", "", clean).strip()
+    clean = re.sub(r"\([\d\.\-\–]+\)", "", clean).strip()
 
     value = _parse_numeric(clean)
     if value is None:
@@ -596,31 +596,26 @@ def _extract_value_and_unit(value_cell: str, unit_cell: str = "") -> tuple[float
     return value, unit
 
 
-def _parse_tables(pdf_path: str) -> list[dict]:
+def _parse_tables(pdf_path: str) -> list:
     results, seen = [], set()
     with pdfplumber.open(pdf_path) as pdf:
         for page in pdf.pages:
             for table in (page.extract_tables() or []):
-                layout = _detect_layout(table)
-
                 for row in table:
                     if not row or len(row) < 2:
                         continue
                     cells = [(c or "").strip() for c in row]
 
-                    # ── Layout B: [Category, Biomarker, Ideal, Actual] ────────
-                    if layout == "B":
-                        if len(cells) < 4:
-                            continue
-                        name_raw   = cells[1]   # biomarker name
-                        value_cell = cells[3]   # actual patient value
-                        unit_cell  = cells[3]   # unit may be embedded here
+                    # Step 1: dynamically find which column holds the value
+                    value_idx = _detect_value_index(cells)
+                    if value_idx is None or value_idx == 0:
+                        continue  # no value found, or value is in col[0] (no room for name)
 
-                    # ── Layout A: [Name, Value, Unit, Ref] ────────────────────
-                    else:
-                        name_raw   = cells[0]
-                        value_cell = cells[1] if len(cells) > 1 else ""
-                        unit_cell  = cells[2] if len(cells) > 2 else ""
+                    # Name is the column immediately before the value column
+                    name_raw   = cells[value_idx - 1]
+                    value_cell = cells[value_idx]
+                    # Unit: column after value if it exists, else embedded in value cell
+                    unit_cell  = cells[value_idx + 1] if value_idx + 1 < len(cells) else ""
 
                     if not name_raw:
                         continue
@@ -682,19 +677,19 @@ def _parse_line(line: str) -> dict | None:
                     name = re.sub(r'\s+', ' ', name).strip()
                     return {"name": name, "value": value, "unit": unit}
 
-    # ── Fallback: no unit in line ────────────────────────────────────────────
-    # Fix 3: relaxed to single space — PDFs often collapse spacing.
-    # Pattern: NAME <1+ spaces> NUMBER  (e.g. "HbA1c 5.9" or "HbA1c   5.6")
-    no_unit_m = re.match(
-        r"^([A-Za-z][A-Za-z0-9\s\-\(\)/,\.]{2,50})\s+(\d+\.?\d*(?:[eE][+\-]?\d+)?)\s*$",
+    # ── Fallback: no unit in line ─────────────────────────────────────────────
+    # Step 2: flexible regex — recovers "HbA1c 5.9", "LDL 146", "eGFR 102"
+    # Requires name to start with a letter and end before a number.
+    flex_m = re.search(
+        r"([A-Za-z][A-Za-z0-9\-\(\) ]{2,50})\s+(\d+\.?\d*)",
         line,
     )
-    if no_unit_m:
-        name  = no_unit_m.group(1).strip()
-        value = float(no_unit_m.group(2))
+    if flex_m:
+        name  = flex_m.group(1).strip()
+        value = float(flex_m.group(2))
         if not _SKIP_CONTENT_RE.search(name) and len(name) >= 3:
             return {"name": name, "value": value, "unit": ""}
-    
+
     return None
 
 
@@ -856,6 +851,33 @@ def _drop_invalid(biomarkers: list[dict]) -> list[dict]:
     return clean
 
 
+# ── Critical biomarker check ─────────────────────────────────────────────────
+# Normalise: lowercase + strip spaces — same logic as Node mapper
+def _norm(s: str) -> str:
+    return re.sub(r"\s+", "", s.lower())
+
+# Minimum set your bio-age calculation actually needs.
+# Add/remove names here as your Node domain structure evolves.
+_CRITICAL = [
+    "hba1c",
+    "ldl",
+    "hdl",
+    "creatinine",
+    "vitamind",     # matches "Vitamin D", "VitaminD", "vitamin d"
+    "calcium",
+    "crp",
+]
+
+def _warn_missing_critical(biomarkers: list) -> None:
+    """Log which critical biomarkers were NOT extracted. Does not modify data."""
+    present = {_norm(b["name"]) for b in biomarkers}
+    missing = [c for c in _CRITICAL if c not in present]
+    if missing:
+        logger.warning("Missing critical biomarkers: %s", missing)
+    else:
+        logger.info("All critical biomarkers present")
+
+
 # ── PUBLIC API ────────────────────────────────────────────────────────────────
 def extract_biomarkers(chunks: list[str], pdf_path: str | None = None) -> list[dict]:
     """
@@ -889,8 +911,14 @@ def extract_biomarkers(chunks: list[str], pdf_path: str | None = None) -> list[d
             logger.debug("FINAL: %s = %s %s", r["name"], r["value"], r["unit"])
 
         logger.info("FINAL COUNT: %d", len(final))
-        return _drop_invalid(_drop_junk(final))
+        clean = _drop_invalid(_drop_junk(final))
+
+        # Step 3: warn about missing critical biomarkers so Node can act on it
+        _warn_missing_critical(clean)
+        return clean
 
     # No pdf_path supplied — LLM only (e.g. called from test with raw chunks)
     logger.info("No pdf_path — LLM-only extraction")
-    return _drop_invalid(_drop_junk(_llm_extract(chunks)))
+    result = _drop_invalid(_drop_junk(_llm_extract(chunks)))
+    _warn_missing_critical(result)
+    return result
