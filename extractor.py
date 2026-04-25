@@ -878,6 +878,34 @@ def _warn_missing_critical(biomarkers: list) -> None:
         logger.info("All critical biomarkers present")
 
 
+# ── Critical biomarker text recovery ─────────────────────────────────────────
+def extract_critical_from_text(full_text: str) -> list[dict]:
+    """
+    Last-resort regex scan for the 5 most important biomarkers directly
+    against raw text. Runs AFTER table+text parsers so it only fills gaps.
+    Patterns are intentionally loose — any proximity match counts.
+    """
+    patterns = {
+        "HbA1c":            r"(hba1c)[^\d]{0,25}(\d+\.?\d*)\s*%",
+        "LDL":              r"(ldl)[^\d]{0,25}(\d+\.?\d*)\s*(?:mg/dl)?",
+        "HDL":              r"(hdl)[^\d]{0,25}(\d+\.?\d*)\s*(?:mg/dl)?",
+        "TotalCholesterol": r"(total\s*cholesterol)[^\d]{0,25}(\d+\.?\d*)",
+        "Triglycerides":    r"(triglycerides)[^\d]{0,25}(\d+\.?\d*)",
+    }
+    results = []
+    for name, pattern in patterns.items():
+        match = re.search(pattern, full_text, re.IGNORECASE)
+        if not match:
+            continue
+        try:
+            value = float(match.group(2))
+        except (IndexError, ValueError):
+            continue
+        unit = "%" if name.lower() == "hba1c" else "mg/dL"
+        results.append({"name": name, "value": value, "unit": unit})
+    return results
+
+
 # ── PUBLIC API ────────────────────────────────────────────────────────────────
 def extract_biomarkers(chunks: list[str], pdf_path: str | None = None) -> list[dict]:
     """
@@ -896,6 +924,12 @@ def extract_biomarkers(chunks: list[str], pdf_path: str | None = None) -> list[d
         # Fix 1: never early-return — always merge both parsers first.
         # If total is still low (< 10), layer in LLM results on top.
         final = _merge(table_res, text_res)
+
+        # Force-recover critical biomarkers missed by table/text parsers
+        full_text = "\n".join(chunks)
+        critical  = extract_critical_from_text(full_text)
+        logger.info("CRITICAL FOUND: %s", [c["name"] for c in critical])
+        final = _merge(final, critical)   # existing results take priority
 
         if len(final) < 10:
             logger.info(
