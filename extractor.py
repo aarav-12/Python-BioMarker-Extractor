@@ -272,7 +272,7 @@ def _llm_extract(chunks: list[str]) -> list[dict]:
     combined = "\n\n---\n\n".join(c[:4000] for c in chunks)
     logger.info("LLM fallback: %d chars", len(combined))
     resp = httpx.post(
-        f"{settings.OLLAMA_BASE_URL}/api/chat",
+        f"{settings.OLLAMA_URL}/api/chat",
         json={
             "model": settings.LLM_MODEL,
             "messages": [
