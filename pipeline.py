@@ -169,8 +169,7 @@ Node backend owns all of that.
 from __future__ import annotations
 import logging
 
-from ingest import build_store
-from retriever import retrieve
+from ingest import _extract_text as extract_text_from_pdf
 from extractor import extract_biomarkers
 from age_extractor import extract_age   # independent module, runs on raw text
 
@@ -178,14 +177,9 @@ logger = logging.getLogger(__name__)
 
 
 def run_pipeline(pdf_path: str) -> dict:
-    # 1. Build vector store (for LLM fallback chunks)
-    try:
-        store = build_store(pdf_path)
-    except Exception as exc:
-        logger.exception("Ingest failed")
-        return {"error": f"Extraction failed: {exc}"}
-
-    chunks = retrieve(store, "biomarker lab results test values")
+    # store = build_store(pdf_path)
+    # chunks = retrieve(store, "biomarker lab results test values")
+    chunks = [extract_text_from_pdf(pdf_path)]
 
     # 2. Extract — table parser first, LLM fallback
     try:
