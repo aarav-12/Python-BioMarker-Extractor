@@ -886,7 +886,7 @@ def extract_critical_from_text(full_text: str) -> list[dict]:
     Patterns are intentionally loose — any proximity match counts.
     """
     patterns = {
-        "HbA1c":            r"(hba1c)[^\d]{0,25}(\d+\.?\d*)\s*%",
+        "HbA1c":            r"(hba1c|glycated\s*hemoglobin)[^\d]{0,40}(\d+\.?\d*)",
         "LDL":              r"(ldl)[^\d]{0,25}(\d+\.?\d*)\s*(?:mg/dl)?",
         "HDL":              r"(hdl)[^\d]{0,25}(\d+\.?\d*)\s*(?:mg/dl)?",
         "TotalCholesterol": r"(total\s*cholesterol)[^\d]{0,25}(\d+\.?\d*)",
@@ -956,3 +956,4 @@ def extract_biomarkers(chunks: list[str], pdf_path: str | None = None) -> list[d
     result = _drop_invalid(_drop_junk(_llm_extract(chunks)))
     _warn_missing_critical(result)
     return result
+
